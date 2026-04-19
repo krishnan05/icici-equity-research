@@ -3,6 +3,8 @@ from src.fetch import get_income_statement, get_balance_sheet, get_current_price
 from src.model    import print_model
 from src.scenarios import print_scenarios
 from src.valuation import print_valuation
+from src.ml_eps      import print_ml_eps
+from src.ml_sentiment import print_sentiment
 
 console = Console()
 
@@ -12,4 +14,6 @@ if __name__ == "__main__":
     print_model()
     print_scenarios()
     print_valuation()
+    print_ml_eps()
+    print_sentiment()
     console.print("\n[bold green]✓ Model complete.[/bold green]\n")
