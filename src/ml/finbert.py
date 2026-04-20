@@ -5,6 +5,10 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from rich.console import Console
 from rich.table import Table
 from rich import box
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+import logging
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 FINBERT_MODEL = "ProsusAI/finbert"
 DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
