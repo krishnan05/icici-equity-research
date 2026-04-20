@@ -1,68 +1,102 @@
 import yfinance as yf
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import torch
+import numpy as np
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from rich.console import Console
 from rich.table import Table
 from rich import box
-from datetime import datetime
 
+FINBERT_MODEL = "ProsusAI/finbert"
+DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-# ── Sector / company keywords for relevance filtering ───────────────────────
 RELEVANT_KEYWORDS = [
-     "bank", "npa", "loan", "credit", "rbi", "rate",
-    "profit", "earnings", "deposit", "nim", "casa", "dividend",
-    "quarter", "results", "growth", "interest", "asset"
+    "bank", "loan", "credit", "rate", "profit", "earnings",
+    "revenue", "ebitda", "growth", "margin", "debt", "interest",
+    "quarter", "results", "dividend", "guidance", "outlook",
+    "acquisition", "merger", "capex", "cashflow", "upgrade",
+    "downgrade", "target", "forecast", "beat", "miss",
+    "investment", "shares", "stock", "market", "financial",
+    "sales", "income", "loss", "gain", "expand", "launch"
 ]
 
+# ── Load FinBERT once at module level ────────────────────────────────────────
+_tokenizer = None
+_model     = None
+
+def load_finbert():
+    global _tokenizer, _model
+    if _tokenizer is None:
+        _tokenizer = AutoTokenizer.from_pretrained(FINBERT_MODEL)
+        _model     = AutoModelForSequenceClassification.from_pretrained(
+                         FINBERT_MODEL).to(DEVICE)
+        _model.eval()
+
+def get_finbert_score(text):
+    """
+    FinBERT returns 3 classes: positive, negative, neutral
+    We convert to a compound score: positive_prob - negative_prob
+    Range: -1.0 (very negative) to +1.0 (very positive)
+    """
+    load_finbert()
+    inputs = _tokenizer(
+        text, return_tensors="pt",
+        truncation=True, max_length=512,
+        padding=True
+    ).to(DEVICE)
+
+    with torch.no_grad():
+        outputs = _model(**inputs)
+        probs   = torch.softmax(outputs.logits, dim=1)[0]
+
+    # FinBERT label order: positive=0, negative=1, neutral=2
+    positive = probs[0].item()
+    negative = probs[1].item()
+    neutral  = probs[2].item()
+
+    compound = positive - negative  # -1 to +1
+    label    = (
+        "🟢 Positive" if compound >= 0.05  else
+        "🔴 Negative" if compound <= -0.05 else
+        "⚪ Neutral"
+    )
+    return round(compound, 3), label, positive, negative, neutral
+
+
 def fetch_news(ticker, max_articles=20):
-    t = yf.Ticker(ticker)
-    news = t.news
-    if not news:
-        return []
+    t    = yf.Ticker(ticker)
+    news = t.news or []
     articles = []
     for item in news[:max_articles]:
-        # handle both old and new yfinance news format
         content = item.get("content", {})
-        title   = (content.get("title") or
-                   item.get("title") or "")
-        summary = (content.get("summary") or
-                   item.get("summary") or "")
-        pub_date = (content.get("pubDate") or
-                    item.get("providerPublishTime") or "")
+        title   = content.get("title") or item.get("title") or ""
+        summary = content.get("summary") or item.get("summary") or ""
         if title:
             articles.append({
                 "title":   title,
-                "summary": summary[:200] if summary else "",
-                "date":    pub_date,
+                "summary": summary[:300],
             })
     return articles
 
 
 def is_relevant(text):
-    text_lower = text.lower()
-    return any(kw in text_lower for kw in RELEVANT_KEYWORDS)
+    return any(kw in text.lower() for kw in RELEVANT_KEYWORDS)
 
 
 def score_sentiment(articles):
-    analyzer = SentimentIntensityAnalyzer()
     scored = []
     for a in articles:
         text = a["title"] + " " + a["summary"]
         if not is_relevant(text):
             continue
-        scores  = analyzer.polarity_scores(text)
-        compound = scores["compound"]  # -1 (very negative) to +1 (very positive)
-        label = (
-            "🟢 Positive" if compound >= 0.05 else
-            "🔴 Negative" if compound <= -0.05 else
-            "⚪ Neutral"
-        )
+        compound, label, pos, neg, neu = get_finbert_score(text)
         scored.append({
             "title":    a["title"][:75] + "..." if len(a["title"]) > 75
                         else a["title"],
-            "score":    round(compound, 3),
+            "score":    compound,
             "label":    label,
-            "date":     a["date"],
+            "positive": round(pos, 3),
+            "negative": round(neg, 3),
+            "neutral":  round(neu, 3),
         })
     return scored
 
@@ -81,56 +115,54 @@ def aggregate_sentiment(scored):
         "📊 NEUTRAL  — Stick with Base case"
     )
     return {
-        "avg_score":  avg,
-        "positive":   positive,
-        "negative":   negative,
-        "neutral":    neutral,
-        "total":      len(scored),
-        "signal":     signal,
+        "avg_score": avg,
+        "positive":  positive,
+        "negative":  negative,
+        "neutral":   neutral,
+        "total":     len(scored),
+        "signal":    signal,
     }
 
 
 def scenario_adjustment(avg_score):
-    """
-    Translate sentiment score into a price target adjustment.
-    Strong positive sentiment → add small premium to base target.
-    Strong negative → apply discount.
-    """
     if avg_score >= 0.15:
-        return +0.05, "Strong positive news flow → +5% premium on base target"
+        return +0.05, "Strong positive sentiment → +5% premium"
     elif avg_score >= 0.05:
-        return +0.02, "Mild positive news flow → +2% premium on base target"
+        return +0.02, "Mild positive sentiment → +2% premium"
     elif avg_score <= -0.10:
-        return -0.05, "Strong negative news flow → -5% discount on base target"
+        return -0.05, "Strong negative sentiment → -5% discount"
     elif avg_score <= -0.05:
-        return -0.02, "Mild negative news flow → -2% discount on base target"
+        return -0.02, "Mild negative sentiment → -2% discount"
     else:
-        return 0.00, "Neutral news flow → no adjustment to base target"
+        return 0.00,  "Neutral sentiment → no adjustment"
 
 
 def print_sentiment(ticker):
     from src.financial.scenarios import get_price_targets
 
     console = Console()
-    console.print("\n[bold blue]━━━ Phase 3: Sentiment Analysis ━━━[/bold blue]")
-    console.print(f"[dim]Fetching recent news for {ticker}...[/dim]\n")
+    console.print("\n[bold blue]━━━ FinBERT Sentiment Analysis ━━━[/bold blue]")
+    console.print(f"[dim]Model: ProsusAI/finbert (financial domain BERT)[/dim]")
+    console.print(f"[dim]Fetching and scoring news for {ticker}...[/dim]\n")
 
     articles = fetch_news(ticker)
     if not articles:
-        console.print("[red]No news found. Check ticker or internet connection.[/red]")
+        console.print("[red]No news found.[/red]")
         return
 
     scored = score_sentiment(articles)
     if not scored:
-        console.print("[yellow]News fetched but no relevant articles found.[/yellow]")
+        console.print("[yellow]No relevant articles found.[/yellow]")
         return
 
     # Article table
     t = Table(show_header=True, header_style="bold magenta",
               box=box.SIMPLE_HEAVY, show_lines=False)
-    t.add_column("Headline",  width=60)
-    t.add_column("Sentiment", width=14, justify="center")
-    t.add_column("Score",     width=8,  justify="right")
+    t.add_column("Headline",   width=55)
+    t.add_column("Sentiment",  width=14, justify="center")
+    t.add_column("Score",      width=8,  justify="right")
+    t.add_column("+ve",        width=6,  justify="right")
+    t.add_column("-ve",        width=6,  justify="right")
 
     for s in scored:
         color = ("green" if "Positive" in s["label"] else
@@ -139,10 +171,11 @@ def print_sentiment(ticker):
             f"[{color}]{s['title']}[/{color}]",
             s["label"],
             f"{s['score']:+.3f}",
+            f"{s['positive']:.2f}",
+            f"{s['negative']:.2f}",
         )
     console.print(t)
 
-    # Aggregate
     agg      = aggregate_sentiment(scored)
     adj, adj_note = scenario_adjustment(agg["avg_score"])
 
@@ -151,16 +184,14 @@ def print_sentiment(ticker):
     console.print(f"  🟢 Positive       : {agg['positive']}")
     console.print(f"  🔴 Negative       : {agg['negative']}")
     console.print(f"  ⚪ Neutral        : {agg['neutral']}")
-    console.print(f"  Avg Score         : {agg['avg_score']:+.3f}  "
-                  f"(range: -1.0 to +1.0)")
-    console.print(f"\n  Signal  → [bold]{agg['signal']}[/bold]")
+    console.print(f"  Avg Score         : {agg['avg_score']:+.3f}")
+    console.print(f"\n  Signal → [bold]{agg['signal']}[/bold]")
 
-    # Get actual base target for this company
     try:
         targets     = get_price_targets(ticker)
         base_target = int(targets.loc["📊 Base", "Avg Target (₹)"])
     except Exception:
-        base_target = 1000  # neutral fallback if valuation fails
+        base_target = 1000
 
     adjusted = round(base_target * (1 + adj))
 
@@ -168,8 +199,9 @@ def print_sentiment(ticker):
     console.print(f"  Base model target    : ₹{base_target:,}")
     console.print(f"  Sentiment adjustment : {adj*100:+.0f}%  ({adj_note})")
     console.print(f"  Adjusted target      : [bold green]₹{adjusted:,}[/bold green]")
-    console.print(f"\n  [dim]Note: Sentiment is a qualitative overlay, "
-                  f"not a replacement for fundamental analysis.[/dim]\n")
-    
+    console.print(f"\n  [dim]FinBERT trained on 10,000+ financial documents — "
+                  f"understands domain-specific language unlike generic NLP.[/dim]\n")
+
+
 if __name__ == "__main__":
-    print_sentiment()
+    print_sentiment("RELIANCE.NS")
