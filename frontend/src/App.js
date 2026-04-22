@@ -126,6 +126,17 @@ export default function App() {
         ))}
       </div>
 
+      {financial && (
+  <a href={`http://localhost:8000/api/report/${ticker}`}
+     target="_blank" rel="noreferrer"
+     style={{ background:'#065f46', border:'none', borderRadius:8,
+              color:'#10b981', cursor:'pointer', fontSize:14,
+              fontWeight:600, padding:'10px 20px', textDecoration:'none',
+              display:'inline-block' }}>
+    ⬇ Download Report
+  </a>
+)}
+
       {/* Tabs */}
       <div style={{ background:'#111827', borderBottom:'1px solid #1f2937',
                     padding:'0 32px', display:'flex', gap:4 }}>
