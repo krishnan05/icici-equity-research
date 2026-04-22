@@ -2,7 +2,10 @@ venv/
 __pycache__/
 *.pyc
 .env
-data/
 outputs/
+*.pdf
 *.xlsx
-node_modules/
+src/ml/__pycache__/
+frontend/node_modules/
+frontend/build/
+.DS_Store

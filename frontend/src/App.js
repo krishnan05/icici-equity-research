@@ -6,7 +6,7 @@ import ScenarioExplorer from './components/ScenarioExplorer';
 import SentimentFeed   from './components/SentimentFeed';
 import MLSignal        from './components/MLSignal';
 
-const API = 'http://localhost:8000/api';
+const API = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
 
 const TABS = [
   { id:'live',      label:'📊 Live Data'    },
